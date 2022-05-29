@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM Template for Watch-Over-Dashboard-and-Cam deployment
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 15
+    MemorySize: 128
+    Architectures:
+      - arm64
+
+####################################
+Parameters:
+############Customizable############
+  ProjectName:
+    Type: String
+    Default: MyPlace #好きな名前に変更
+  Topic1:
+    Type: String
+    Default: Place1/motion #Place1を好きな名前に変更->以下全てのPlaceをすべて同じ名前に
+  Place1:
+    Type: String
+    Default: 'Place1' #カメラの設置場所名/Topic1と同じ
+  TopicAlert:
+    Type: String
+    Default: Place1/alert #アラートを出すIoT topic
+  SNSTopic:
+    Type: String
+    Default: MyPlaceAlert #SNS topic
+  OrgBucketName:
+    Type: String
+    Default: my-mimamori-bucket-20220529 #好きな名前に変更
+  NameTag:
+    Type: String
+    Default: 'PlaceWatchOver' #好きな名前に変更
+  Metric1: #玄関
+    Type: String
+    Default: enter_count #Sensor設置場所が分かる名前に変更
+  Metric2: #トイレ
+    Type: String
+    Default: rest_count #Sensor設置場所が分かる名前に変更
+############# Fixed #############
+  EventPrefix:
+    Type: String
+    Default: 'emr'
+#################################
+
+
+Resources:
+  OriginS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties: 
+      BucketName: !Sub ${OrgBucketName}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+  OriginS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OriginS3Bucket
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub arn:aws:s3:::${OriginS3Bucket}/*
+            Principal:
+              AWS: !Sub arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOriginAccessIdentity}
+  LambdaFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: function/
+      FunctionName: !Sub ${ProjectName}Func
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          PLACE1: !Sub ${Place1}
+          ORG_BACKET: !Sub ${OrgBucketName}
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref OriginS3Bucket 
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: prefix
+                  Value: !Sub ${EventPrefix} 
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Tags:
+        Name: !Sub ${NameTag}
+  LambdaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${LambdaFunction}
+      RetentionInDays: 7
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${ProjectName}FuncPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: 
+                  - "arn:aws:logs:*:*:*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource: 
+                  - !Sub "arn:aws:s3:::*"
+# CloudWatch Dashboard出力とSNSへpublishするのに必要なIAM role
+  IoTRuleActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "iot.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      RoleName: !Sub ${ProjectName}IoTRuleActionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}CustomMetricsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "cloudwatch:PutMetricData"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "sns:Publish"
+                  - "sns:Subscribe"
+                Resource: !Sub arn:aws:sns:*:${AWS::AccountId}:*
+# Place1のメトリクス1のIoT rules
+  IoTRule11:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub ${ProjectName}IoTRule11
+      TopicRulePayload:
+        Actions:
+          - CloudwatchMetric:
+              MetricName: !Sub ${Metric1}
+              MetricNamespace: !Sub ${Topic1}
+              MetricUnit: None
+              MetricValue: !Join
+                            - ''
+                            - - '${'
+                              - !Sub ${Metric1}
+                              - '}'
+              RoleArn: !GetAtt IoTRuleActionRole.Arn
+        AwsIotSqlVersion: "2016-03-23"
+        Description: String
+        RuleDisabled: false
+        Sql: !Sub
+          "SELECT * FROM '${Topic1}'"
+      Tags:
+        - Key: Name
+          Value: !Sub ${NameTag}
+# Place1のメトリクス2のIoT rules
+  IoTRule12:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub ${ProjectName}IoTRule12
+      TopicRulePayload:
+        Actions:
+          - CloudwatchMetric:
+              MetricName: !Sub ${Metric2}
+              MetricNamespace: !Sub ${Topic1}
+              MetricUnit: None
+              MetricValue: !Join
+                            - ''
+                            - - '${'
+                              - !Sub ${Metric2}
+                              - '}'
+              RoleArn: !GetAtt IoTRuleActionRole.Arn
+        AwsIotSqlVersion: "2016-03-23"
+        Description: String
+        RuleDisabled: false
+        Sql: !Sub
+          "SELECT * FROM '${Topic1}'"
+      Tags:
+        - Key: Name
+          Value: !Sub ${NameTag}
+# Place1から15時間反応がない時に出るアラートをtriggerにSNS topicからpublishさせるIoT rules
+  IoTRuleSNS1:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub ${ProjectName}IoTRuleSNS1
+      TopicRulePayload:
+        Actions:
+          - Sns:
+              TargetArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}
+              RoleArn: !GetAtt IoTRuleActionRole.Arn
+        AwsIotSqlVersion: "2016-03-23"
+        Description: String
+        RuleDisabled: false
+        Sql: !Sub
+          "SELECT * FROM '${TopicAlert}'"
+      Tags:
+        - Key: Name
+          Value: !Sub ${NameTag}
+#Place1から15時間反応がない時に登録先にe-mailを発信するSNS topic
+  NotifyMailSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}_Alert
+      Subscription:
+        - Endpoint: nsaito9628@gmail.com
+          Protocol: email
+#10分毎に入ってくるSensorデータを表示するCloudWatch Dashboard
+  CloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${ProjectName}Dashboard
+      DashboardBody: !Sub 
+                      '{
+                        "widgets": [
+                            {
+                                "height": 6,
+                                "width": 12,
+                                "y": 0,
+                                "x": 0,
+                                "type": "metric",
+                                "properties": {
+                                    "metrics": [
+                                        [ 
+                                          "${Topic1}", 
+                                          "${Metric1}" 
+                                        ]
+                                    ],
+                                    "view": "timeSeries",
+                                    "stacked": false,
+                                    "region": "ap-northeast-1",
+                                    "title": "Entrance",
+                                    "period": 60,
+                                    "stat": "Sum"
+                                }
+                            },
+                            {
+                                "height": 6,
+                                "width": 12,
+                                "y": 0,
+                                "x": 12,
+                                "type": "metric",
+                                "properties": {
+                                    "metrics": [
+                                        [ 
+                                          "${Topic1}",
+                                          "${Metric2}" 
+                                        ]
+                                    ],
+                                    "view": "timeSeries",
+                                    "stacked": false,
+                                    "region": "ap-northeast-1",
+                                    "title": "Rest room",
+                                    "period": 60,
+                                    "stat": "Sum"
+                                }
+                            }
+                        ]
+                    }'
+#S3にためるmp4を12回前の録画まで遡って表示できる簡易webページ用のCloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        #WebACLId: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/WAF_NAME/id
+        Origins:
+        - Id: S3Origin
+          DomainName: !Sub "${OriginS3Bucket}.s3.${AWS::Region}.amazonaws.com"
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+        DefaultRootObject: index.html
+        Comment: !Sub ${AWS::StackName} distribution
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ForwardedValues:
+            QueryString: false
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            #- "OPTIONS"
+            #- "PUT"
+            #- "PATCH"
+            #- "POST"
+            #- "DELETE"
+          # キャッシュを無効化
+          DefaultTTL: 0
+          MaxTTL: 0
+          MinTTL: 0
+        IPV6Enabled: false
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref AWS::StackName
+
+#mp4ファイル簡易表示webページ用のCloudFront domain
+Outputs:
+  DomainName:
+    Value: !GetAtt CloudFrontDistribution.DomainName
