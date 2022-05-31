@@ -41,6 +41,9 @@ Parameters:
   Metric2: #トイレ
     Type: String
     Default: rest_count #Sensor設置場所が分かる名前に変更
+  EMail:
+    Type: String
+    Default: your-mail-id@example.com #アラート配信先のm-mail
 ############# Fixed #############
   EventPrefix:
     Type: String
@@ -229,7 +232,7 @@ Resources:
     Properties:
       TopicName: !Sub ${ProjectName}_Alert
       Subscription:
-        - Endpoint: nsaito9628@gmail.com
+        - Endpoint: !Sub ${EMail}
           Protocol: email
 #10分毎に入ってくるSensorデータを表示するCloudWatch Dashboard
   CloudWatchDashboard:
